@@ -3,206 +3,135 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading;
-using SimpleTcp;
+using Lidgren.Network;
 using System.Net;
 
 namespace SausageIPC
 {
     public class IpcClient
     {
-        SimpleTcpClient _client;
-        public string Alias;
-        public event EventHandler<IpcMessage> OnInfoReceived;
-        public event EventHandler<QueryEventArgs> OnQuerying;
-        public event EventHandler<ClientDisconnectedEventArgs> OnDisconnected;
-        private Dictionary<string, EventHandler<QueryEventArgs>> QueryHandlers = new Dictionary<string, EventHandler<QueryEventArgs>>();
 
+        public IPEndPoint EndPoint;
+        private NetClient _client;
+        public string Alias { get;private set; }
+        public float Latency;
+        public NetDeliveryMethod DefaultDeliveryMethod = NetDeliveryMethod.Unreliable;
+        public NetConnectionStatus Status
+        {
+            get { return _client.ConnectionStatus; }
+        }
+        public event EventHandler<IpcMessage> OnMessageReceived;
+        public event EventHandler<IpcMessage> OnConnected;
+        public event EventHandler<string> OnDisonnected;
+        public event EventHandler<QueryEventArgs> OnQuerying;
+        private event EventHandler<IpcMessage> OnReplyReceived;
+        private HashSet<int> InProgreeQueries = new HashSet<int>();
+        private Thread NetworkThread;
+        private bool Stopping { get; set; } = false;
         public IPEndPoint ServerEndpoint;
         public IPEndPoint LocalEndpoint;
-        public IpcClient(IPEndPoint server, string alias)
+        public IpcClient(IPEndPoint local,string alias)
         {
-            
-            _client = new SimpleTcpClient(server.ToString());
-            _client.Events.DataReceived += DataReceived;
-            _client.Events.Disconnected += Disconnected; ;
-            _client.Connect();
+            NetPeerConfiguration config = new NetPeerConfiguration("623c92c287cc392406e7aaaac1c0f3b0")
+            {
+                AutoFlushSendQueue = true,
+                LocalAddress = local.Address,
+                Port = local.Port,
+            };
+            config.EnableMessageType(NetIncomingMessageType.ConnectionLatencyUpdated);
 
-            ServerEndpoint = server;
-            LocalEndpoint=_client.LocalEndpoint;
-            if (String.IsNullOrEmpty(alias)) { alias=LocalEndpoint.ToString(); }
+            _client = new NetClient(config);
+            _client.Start();
+
+            NetworkThread=new Thread(() =>
+            {
+                while (!Stopping)
+                {
+                    Process(_client.WaitMessage(20));
+                }
+                NetworkThread.Start();
+            });
+            if (string.IsNullOrEmpty(alias)) { alias=LocalEndpoint.ToString(); }
             Alias = alias;
         }
-
-        private void Disconnected(object sender, ClientDisconnectedEventArgs e)
+        private void Process(NetIncomingMessage msg)
         {
-            OnDisconnected?.Invoke(this, e);
+            if (msg == null) { return; }
+            switch (msg.MessageType)
+            {
+                case NetIncomingMessageType.ConnectionLatencyUpdated:
+                    {
+                        Latency=msg.ReadFloat();
+                        break;
+                    }
+                case NetIncomingMessageType.StatusChanged:
+                    {
+                        NetConnectionStatus status = (NetConnectionStatus)msg.ReadByte();
+
+                        if (status == NetConnectionStatus.Disconnected)
+                        {
+                            OnDisonnected?.Invoke(this, msg.ReadString());
+                        }
+                        else if (status == NetConnectionStatus.Connected)
+                        {
+                            OnConnected?.Invoke(this, new IpcMessage(msg));
+                        }
+                        break;
+                    }
+                case NetIncomingMessageType.Data:
+                    {
+                        var message = new IpcMessage(msg);
+                        switch (message.MessageType)
+                        {
+                            case MessageType.Message:
+                                OnMessageReceived?.Invoke(this, message);
+                                break;
+                            case MessageType.Query:
+                                {
+                                    OnQuerying?.Invoke(this, new QueryEventArgs(message));
+                                    break;
+                                }
+                            case MessageType.Reply:
+                                {
+                                    OnReplyReceived?.Invoke(this, message);
+                                    break;
+                                }
+                        }
+                        break;
+                    }
+            }
         }
-
-        public IpcClient(string serverIpPort, string alias) : this(Helper.StringToEP(serverIpPort),alias) { }
-        private void DataReceived(object sender, DataReceivedEventArgs e)
+        public IpcMessage Connect(string host,int port,int timeout,IpcMessage connectMessage)
         {
-            IpcMessage msg;
-            try
+            AutoResetEvent connected=new AutoResetEvent(false); 
+            IpcMessage reply=null;
+            var handler = new EventHandler<IpcMessage>((s, message) =>
             {
-                msg = new IpcMessage(Encoding.UTF8.GetString(e.Data));
-                msg.Parameters.SetInfo("!Info.Sr", e.EndPoint.ToString());
-            }
-            catch (Exception ex)
-            {
-                IpcDebug.Write(ex, "ParseMessage");
-                return;
-            }
-            HandleData(msg);
-        }
-        void HandleData(IpcMessage msg)
-        {
-            try
-            {
-                if (msg.Type == MessageType.Query)
-                {
-
-                    QueryEventArgs args = new QueryEventArgs(msg);
-                    OnQuerying?.Invoke(this, args);
-                    OnQuerying?.Invoke(this, args);
-
-                    if (QueryHandlers.ContainsKey(msg.Header)) { QueryHandlers[msg.Header].Invoke(this, args); }
-
-                    args.Reply.SenderAlias = Alias;
-                    Send(args.Reply);
-                }
-                if (msg.Type == MessageType.Info)
-                {
-
-                    OnInfoReceived?.Invoke(this, msg);
-                }
-
-            }
-            catch (Exception ex)
-            {
-                IpcDebug.Write(ex, "IpcClient.HandleData");
-            }
-
-        }
-
-        /// <summary>
-        /// Send a Query to server
-        /// </summary>
-        /// <param name="message">The message to send. No metadata need to be set, but ForwardTarget and ForwardTargetAlias can be set to send the query another client.</param>
-        /// <param name="Timeout"></param>
-        /// <returns>Returns the response from server.(or client if you have forward parameter set.)</returns>
-        public IpcMessage Query(IpcMessage message, TimeSpan Timeout = default)
-        {
-            if (Timeout == default)
-            {
-                Timeout = TimeSpan.FromMilliseconds(5000);
-            }
-            IpcDebug.Record("Setting up query message");
-
-            message.Type = MessageType.Query;
-            message.QueryID = GetRandomString(10);
-            message.SenderAlias = Alias;
-            message.Recipient = ServerEndpoint;
-
-            IpcMessage Reply = null;
-            IpcDebug.Record("Registering callback event");
-            AutoResetEvent Replied = new AutoResetEvent(false);
-            EventHandler<DataReceivedEventArgs> handler = new EventHandler<DataReceivedEventArgs>((s, args) =>
-            {
-                IpcMessage reply = new IpcMessage(Encoding.UTF8.GetString(args.Data));
-
-                //check query id
-                if (reply.QueryID == message.QueryID)
-                {
-
-
-                    Reply = reply;
-                    Replied.Set();
-                }
-                
+                reply= message;
+                connected.Set();
             });
-            _client.Events.DataReceived += handler;
-            IpcDebug.Record("Preparing to send message");
-            Send(message);
-
-            Replied.WaitOne(Timeout);
-            
-            _client.Events.DataReceived -= handler;
-            if (Reply == null) { throw new TimeoutException("Server did not respond in specified interval."); }
-            return Reply;
-        }
-
-        /// <summary>
-        /// 
-        /// </summary>
-        /// <param name="msg">The message to send. No metadata need to be set.</param>
-        /// <param name="TargetAlias">The alias of another client you want to query.</param>
-        /// <param name="Timeout"></param>
-        /// <returns>Returns the response from another client.</returns>
-        public IpcMessage Query(IpcMessage msg, string TargetAlias, TimeSpan Timeout = default)
-        {
-            msg.ForwardTargetAlias = TargetAlias;
-            return Query(msg, Timeout);
-        }
-
-        /// <summary>
-        /// Send a Info, Query or Reply. The metadata won't be altered.
-        /// </summary>
-        /// <param name="message"></param>
-        public void Send(IpcMessage message)
-        {
-            if (String.IsNullOrEmpty(message.SenderAlias)) { message.SenderAlias = Alias; }
-            message.Recipient = ServerEndpoint;
-            IpcDebug.Record("Sending message");
-            _client.Send(Encoding.UTF8.GetBytes(message.Raw));
-        }
-        /// <summary>
-        /// Register an EventHandler to handle query with certain headers. One header can only have one handler.
-        /// </summary>
-        /// <param name="header"></param>
-        /// <param name="handler"></param>
-        /// <returns>Indicates whether the handler is registered successfully</returns>
-        public bool RegisterQueryHandler(string header, EventHandler<QueryEventArgs> handler)
-        {
-            if (QueryHandlers.ContainsKey(header)) { return false; }
-            else { QueryHandlers.Add(header, handler); return true; }
-        }
-        /// <summary>
-        /// Unregister the associated handler
-        /// </summary>
-        /// <param name="header"></param>
-        public void UnregisterQueryHandler(string header)
-        {
-            if (QueryHandlers.ContainsKey(header)) { QueryHandlers.Remove(header); }
-        }
-        public List<Client> GetClients()
-        {
-            IpcMessage msg = Query(new IpcMessage(header:"!If.GetClients"));
-            List<KeyValuePair<string, string>> clients = Helper.RemoveMd(msg.Parameters.Variables.ToList());
-            List<Client> Clients= new List<Client>();
-            foreach (KeyValuePair<string,string> pair in clients)
+            OnConnected+=handler;
+            var msg = _client.CreateMessage();
+            msg.Data=connectMessage.Serialize();
+            _client.Connect(host, port, msg);
+            if (connected.WaitOne(timeout))
             {
-                try
+                OnConnected-=handler;
+                if (reply.IsValid)
                 {
-                    Clients.Add(new IpcClientInfo(Helper.StringToEP(pair.Key), pair.Value));
+                    return reply;
                 }
-                catch {}
+                else
+                {
+                    return null;
+                }
             }
-            return Clients;
-        }
-
-        static string GetRandomString(int length)
-        {
-            var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-            var stringChars = new char[length];
-            var random = new Random();
-
-            for (int i = 0; i < stringChars.Length; i++)
+            else
             {
-                stringChars[i] = chars[random.Next(chars.Length)];
+                OnConnected-=handler;
+                throw new TimeoutException("Server did not respond in specified time window.");
             }
-
-            var finalString = new String(stringChars);
-            return finalString;
         }
+
     }
 }

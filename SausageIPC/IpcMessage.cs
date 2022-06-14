@@ -13,7 +13,7 @@ namespace SausageIPC
         /// <summary>
         /// A message that doesn't need a reply or correspond to a query.
         /// </summary>
-        Info = 1,
+        Message = 1,
         Query = 2,
         Reply = 3,
     }
@@ -21,32 +21,33 @@ namespace SausageIPC
     {
         Error = 1,
         Unhandled = 2,
-        Succeeded = 0,
+        Sucess = 0,
         Unused = 3,
     }
     public class IpcMessage {
         public IpcMessage() { }
-        public ReplyStatus ReplyStatus { get; set; } = ReplyStatus.Unused;
+        internal ReplyStatus ReplyStatus { get; set; } = ReplyStatus.Unused;
+        internal bool IsValid { get; set; } = true;
         public byte[] Data { get; set; }
         internal IpcMessage(NetIncomingMessage msg)
         {
             Deserialize(msg);
         }
-        internal MessageType MessageType { get; set; } = MessageType.Info;
+        internal MessageType MessageType { get; set; } = MessageType.Message;
         internal int QueryID { get; set; }
         public Dictionary<string, string> MetaData { get; set; } = new Dictionary<string, string>();
         internal byte[] Serialize()
         {
             List<byte> data = new List<byte>();
-
-            if(MessageType== MessageType.Reply)
+            switch (MessageType)
             {
-                data.Add((byte)ReplyStatus);
-                data.AddInt(QueryID);
-            }
-            else if (MessageType==MessageType.Query)
-            {
-                data.AddInt(QueryID);
+                case MessageType.Query:
+                    data.AddInt(QueryID);
+                    break;
+                case MessageType.Reply:
+                    data.Add((byte)ReplyStatus);
+                    data.AddInt(QueryID);
+                    break ;
             }
 
             data.AddInt(MetaData.Count);
@@ -55,10 +56,12 @@ namespace SausageIPC
                 data.AddString(kv.Key);
                 data.AddString(kv.Value);
             }
+            data.AddRange(Data);
             return data.ToArray();
         }
         internal void Deserialize(NetIncomingMessage msg)
         {
+            if (msg.Data.Length==0) {IsValid=false; return; }
             var reader=new BitReader(msg.Data);
             
             if((MessageType = (MessageType)msg.SequenceChannel) == MessageType.Reply)

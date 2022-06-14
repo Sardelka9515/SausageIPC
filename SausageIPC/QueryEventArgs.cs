@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using SettingsProvider;
 
 namespace SausageIPC
 {
@@ -13,14 +12,19 @@ namespace SausageIPC
         public QueryEventArgs(IpcMessage qmsg)
         {
             Query = qmsg;
-            Reply=new IpcMessage()
+            ReplyMessage=new IpcMessage()
             {
                 ReplyStatus=ReplyStatus.Unhandled,
                 MessageType=MessageType.Reply,
             };
-
         }
-        public IpcMessage Query;
-        public IpcMessage Reply;
+        public void Reply(IpcMessage msg,ReplyStatus statusCode=ReplyStatus.Sucess)
+        {
+            if(msg == null) { throw new ArgumentNullException("Reply message was null."); }
+            ReplyMessage= msg;
+            msg.ReplyStatus=statusCode;
+        }
+        public IpcMessage Query { get; internal set; }
+        internal IpcMessage ReplyMessage { get; set; }
     }
 }
