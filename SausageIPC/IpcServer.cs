@@ -5,7 +5,8 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Net;
-using System.Net.Sockets;
+using Lidgren.Network;
+using System.Security.Cryptography;
 
 namespace SausageIPC
 {
@@ -13,17 +14,25 @@ namespace SausageIPC
     {
 
         public IPEndPoint EndPoint;
-        private TcpClient server;
+        private NetServer _server;
         private IPEndPoint InvalidEndPoint = new IPEndPoint(IPAddress.Parse("127.0.0.1"), 0);
         public string Alias;
-        public event EventHandler<IpcMessage> OnInfoReceived;
-        public event EventHandler<QueryEventArgs> OnQuerying;
+        public NetDeliveryMethod DefaultDeliveryMethod = NetDeliveryMethod.Unreliable;
+        public event EventHandler<IpcMessage> OnMessageReceived;
+        public event EventHandler<HandshakeEventArgs> OnHandshake;
+        public event EventHandler<Client> OnConnected;
+        public event EventHandler<Client> OnDisonnected;
+        public event EventHandler<QueryEventArgs> OnQuery;
+        private event EventHandler<ReplyReceivedEventArgs> OnReplyReceived;
+        private HashSet<int> InProgreeQueries=new HashSet<int>();
         private Dictionary<string, EventHandler<QueryEventArgs>> QueryHandlers=new Dictionary<string, EventHandler<QueryEventArgs>>();
+        public Dictionary<IPEndPoint,Client> Clients=new Dictionary<IPEndPoint,Client>();
         /// <summary>
         /// If set to true,the client is allowed to connect with alias already present on the server. Could cause issue when forwarding messages.
         /// </summary>
         public bool AllowDuplicateAlias=false;
-        public List<IpcClientInfo> Clients=new List<IpcClientInfo>();
+
+        private bool Stopping = false;
 
         #region Constructors
         /// <summary>
@@ -41,34 +50,27 @@ namespace SausageIPC
 
                 EndPoint = _endPoint;
                 IpcDebug.Write("Staring IPC server at "+EndPoint.ToString(),"StartIPC",LogType.Info);
-                server = new TcpClient(_endPoint);
-                server.Client.BeginAccept(,)
+
+                var config = new NetPeerConfiguration("Sardelka9515.SausageIPC")
+                {
+                    AutoFlushSendQueue = true,
+                    LocalAddress =EndPoint.Address,
+                    Port=EndPoint.Port,
+                };
+                config.EnableMessageType(NetIncomingMessageType.ConnectionApproval);
+                config.EnableMessageType(NetIncomingMessageType.ConnectionLatencyUpdated);
+                _server=new NetServer(config);
+                _server.Start();
                 Task.Run(() =>
                 {
-                    while (true)
+                    while (!Stopping)
                     {
-                        Clients.Add(new IpcClientInfo()
-                        {
-                            Client = server.Client.acc()
-                        });
+                        PollEvents(_server.WaitMessage(200));
                     }
                 });
-                _server = new SimpleTcpServer(EndPoint.ToString());
-                _server.Events.ClientConnected += ClientConnected;
-                _server.Events.ClientDisconnected += ClientDisconnected;
-                _server.Events.DataReceived += DataReceived;
-                _server.Start();
                 if (alias == null) { alias = EndPoint.ToString(); }
                 Alias = alias;
 
-                RegisterQueryHandler("!If.GetClients", (s, e) => 
-                {
-                    foreach(IpcClientInfo client in Clients)
-                    {
-                        e.Reply.Parameters.Set(client.EndPoint.ToString(), client.Alias);
-                        e.Reply.Status = ReplyStatus.Succeeded;
-                    }
-                });
             }
             catch (Exception ex)
             {
@@ -79,261 +81,208 @@ namespace SausageIPC
                 else { throw ex; }
             }
         }
+
+        private void PollEvents(NetIncomingMessage msg)
+        {
+            if(msg == null) { return; }
+            switch (msg.MessageType)
+            {
+                case NetIncomingMessageType.ConnectionApproval:
+                    {
+                        var message = new IpcMessage(msg);
+                        var args = new HandshakeEventArgs()
+                        {
+                            EndPoint=msg.SenderEndPoint,
+                            Alias=message.MetaData["Alias"]
+                        };
+                        OnHandshake?.Invoke(this, args);
+                        if (args.Cancel)
+                        {
+                            msg.SenderConnection.Deny(args.DenyReason);
+                        }
+                        else
+                        {
+                            if (args.ApproveResponse==null)
+                            {
+                                msg.SenderConnection.Approve();
+                            }
+                            else
+                            {
+                                var response = _server.CreateMessage();
+                                response.Data = args.ApproveResponse.Serialize();
+                                msg.SenderConnection.Approve(response);
+                            }
+                            Clients.Add(msg.SenderEndPoint, new Client()
+                            {
+                                Alias=args.Alias,
+                                Connection=msg.SenderConnection,
+                                EndPoint=msg.SenderEndPoint,
+                            });
+                        }
+                        break;
+                    }
+                case NetIncomingMessageType.ConnectionLatencyUpdated:
+                    {
+                        Client c;
+                        if (Clients.TryGetValue(msg.SenderEndPoint, out c))
+                        {
+                            c.Latency=msg.ReadFloat();
+                        }
+                        else
+                        {
+                            msg.SenderConnection.Disconnect("Unauthorized");
+                        }
+                        break;
+                    }
+                case NetIncomingMessageType.StatusChanged:
+                    {
+                        NetConnectionStatus status = (NetConnectionStatus)msg.ReadByte();
+
+                        if (status == NetConnectionStatus.Disconnected)
+                        {
+                            Client c;
+                            if (Clients.TryGetValue(msg.SenderEndPoint,out c))
+                            {
+                                OnDisonnected?.Invoke(this, c);
+                                Clients.Remove(msg.SenderEndPoint);
+                            }
+                        }
+                        else if (status == NetConnectionStatus.Connected)
+                        {
+                            Client c;
+                            if(Clients.TryGetValue(msg.SenderEndPoint,out c))
+                            {
+                                OnConnected?.Invoke(this,c);
+                            }
+                            else
+                            {
+                                msg.SenderConnection.Disconnect("Unauthorized");
+                            }
+                        }
+                        break;
+                    }
+                case NetIncomingMessageType.Data:
+                    {
+                        var message=new IpcMessage(msg);
+                        switch (message.MessageType)
+                        {
+                            case MessageType.Info:
+                                OnMessageReceived?.Invoke(this, message);
+                                break;
+                            case MessageType.Query:
+                                {
+                                    OnQuery?.Invoke(this, new QueryEventArgs(message));
+                                    break;
+                                }
+                            case MessageType.Reply:
+                                {
+                                    OnReplyReceived?.Invoke(this, new ReplyReceivedEventArgs()
+                                    {
+                                        SenderEndPoint= msg.SenderEndPoint,
+                                        Message=message
+                                    });
+                                    break;
+                                }
+                        }
+                        break;
+                    }
+            }
+        }
+
         public IpcServer(string ipport, string alias = null, bool UseAlternatePort = false) : this(Helper.StringToEP(ipport),alias , UseAlternatePort) { }
         #endregion
-        private void ClientConnected(object sender, ClientConnectedEventArgs e)
-        {
-            Task.Run(() =>
-            {
-                if (!QueryClientInfo(e.EndPoint)) { return; }
-                e.ClientInfo = GetClientInfo(e.EndPoint);
-                OnClientConnected?.Invoke(this, e);
-            });
-            
-        }
 
-        
-
-        private void ClientDisconnected(object sender, ClientDisconnectedEventArgs e)
-        {
-            
-            Task.Run(() => { 
-                OnClientDisconnected?.Invoke(this, e);
-
-                if (Clients.Contains(GetClientInfo(e.EndPoint)))
-                {
-                    Clients.Remove(GetClientInfo(e.EndPoint));
-                }
-
-                    
-            });
-        }
-        private bool QueryClientInfo(IPEndPoint endPoint)
-        {
-            string alias = Query("!",endPoint).SenderAlias;
-            try
-            {
-                if (!AllowDuplicateAlias)
-                {
-                    foreach (IpcClientInfo client in Clients)
-                    {
-                        if (client.Alias == alias) { _server.DisconnectClient(endPoint.ToString()); return false; }
-                    }
-                }
-                if (!Clients.Contains(GetClientInfo(endPoint)))
-                {
-                    Clients.Add(new IpcClientInfo(endPoint, alias));
-                    return true;
-                }
-                return false;
-            }
-            catch (Exception ex)
-            {
-                IpcDebug.Write(ex, "QueryClientInfo");
-                return false;
-            }
-        }
-        public IpcClientInfo GetClientInfo(IPEndPoint ep)
-        {
-            foreach(var client in Clients)
-            {
-                if(Equals(client.EndPoint.ToString(), ep.ToString())) { return client; }
-            }
-            return new IpcClientInfo(Helper.StringToEP("127.0.0.1:0"), "NonExistent");
-        }
         public IPEndPoint GetClientByAlias(string alias)
         {
-            foreach (var client in Clients)
+            foreach (var client in Clients.Values)
             {
                 if (client.Alias ==alias) { return client.EndPoint; }
             }
             throw new KeyNotFoundException("No client associated with alias:"+alias+" was found");
         }
-        private void DataReceived(object sender, DataReceivedEventArgs e)
-        {
-            
-
-            IpcDebug.RestartCounter();
-            IpcDebug.Record("Message received");
-            IpcMessage msg;
-
-            
-
-            try
-            {
-                msg= new IpcMessage(Encoding.UTF8.GetString(e.Data));
-                msg.Sender = e.EndPoint;
-            }
-            catch (Exception ex)
-            {
-                IpcDebug.Write(ex, "ParseMessage");
-                return;
-            }
-            IpcDebug.Record("Message parsed");
-            HandleData(msg);
-            
-            IpcDebug.Record("processing completed");
-        }
-        void HandleData(IpcMessage msg)
-        {
-            try
-            {
-                
-
-                if (msg.Type==MessageType.Query)
-                {
-                    try
-                    {
-                        IpcDebug.Record("Processing query");
-
-                        //Handle forward
-                        string FAlias = msg.ForwardTargetAlias;
-                        string FT=msg.ForwardTarget;
-                        if ((FAlias != "")||(FT!=""))
-                        {
-                            if (FAlias != "")
-                            {
-                                FT = GetClientByAlias(FAlias).ToString();
-                            }
-                            IPEndPoint Target = Helper.StringToEP(FT);
-                            IpcDebug.Write("Forwarding query from " + msg.Sender + " to " + msg.ForwardTargetAlias, "Forward", LogType.Info);
-                            msg.Recipient = Target;
-                            IpcMessage Reply = Query(msg);
-
-                            Reply.Recipient = msg.Sender;
-
-                            Send(Reply);
-                            IpcDebug.Write("Forward completed", "Forward", LogType.Info);
-
-                            return;
-                        }
-
-                        
-                        QueryEventArgs args = new QueryEventArgs(msg);
-                        OnQuerying?.Invoke(this, args);
-
-                        if (QueryHandlers.ContainsKey(msg.Header)) { QueryHandlers[msg.Header].Invoke(this,args); }
-
-                        IpcDebug.Record("Sending Reply");
-                        args.Reply.SenderAlias = Alias;
-                        Send(args.Reply);
-                    }
-                    catch(Exception ex)
-                    {
-
-                        try
-                        {
-                            //Try sending the error message back to client
-                            IpcMessage ErrorReply = new IpcMessage(MessageType.Reply, ReplyStatus.Error, recipient: msg.Sender, header: "Server Error");
-                            ErrorReply.Parameters.Set("Error", ex.ToString());
-                            ErrorReply.Parameters.Set("Error message", ex.Message);
-                            ErrorReply.QueryID = msg.QueryID;
-                            Send(ErrorReply);
-                        }
-                        catch(Exception exc)
-                        {
-                            IpcDebug.Write(exc, "ReplyError");
-                        }
-                        IpcDebug.Write(ex, "HandleQuery");
-                    }
-                }
-                if (msg.Type == MessageType.Info)
-                {
-                    //Handle forward
-                    string FAlias = msg.ForwardTargetAlias;
-                    string FT = msg.ForwardTarget;
-                    if ((FAlias != "") || (FT != ""))
-                    {
-                        if (FAlias != "")
-                        {
-                            FT = GetClientByAlias(FAlias).ToString();
-                        }
-                        IPEndPoint Target = Helper.StringToEP(FT);
-                        IpcDebug.Write("Forwarding info from " + msg.Sender + " to " + msg.ForwardTargetAlias, "Forward", LogType.Info);
-                        msg.Recipient = Target;
-                        Send(msg);
-
-                        return;
-                    }
-                    OnInfoReceived?.Invoke(this, msg);
-                }
-
-            }
-            catch (Exception ex)
-            {
-                IpcDebug.Write(ex, "IpcServer.HandleData");
-            }
-
-        }
-        public IpcMessage Query(IpcMessage message,TimeSpan Timeout = default)
-        {
-            if (Timeout == default)
-            {
-                Timeout = TimeSpan.FromMilliseconds(5000);
-            }
-
-            message.Type = MessageType.Query;
-            if (message.QueryID == "") { message.QueryID = GetRandomString(10); }
-            message.SenderAlias = Alias;
-
-            IpcMessage Reply=null;
-            
-            AutoResetEvent Replied = new AutoResetEvent(false);
-            EventHandler<DataReceivedEventArgs> handler = new EventHandler<DataReceivedEventArgs>((s, args) =>
-            {
-                IpcMessage reply = new IpcMessage(Encoding.UTF8.GetString(args.Data));
-
-                //check query id
-                if (reply.QueryID == message.QueryID)
-                {
-
-
-                    Reply = reply;
-                    Replied.Set();
-                }
-            });
-            _server.Events.DataReceived += handler;
-            Send(message);
-
-            Replied.WaitOne(Timeout);
-            _server.Events.DataReceived -= handler;
-            return Reply;
-        }
-        public IpcMessage Query(string header,IPEndPoint target, TimeSpan Timeout = default)
-        {
-            return Query(new IpcMessage(header:header,recipient:target),Timeout);
-        }
 
         /// <summary>
-        /// Register an EventHandler to handle query with certain headers. One header can only have one handler.
+        /// Register an EventHandler to handle query with specified headers. One header can have multiple handlers.
         /// </summary>
         /// <param name="header"></param>
         /// <param name="handler"></param>
-        /// <returns>Indicates whether the handler is registered successfully</returns>
-        public bool RegisterQueryHandler(string header, EventHandler<QueryEventArgs> handler)
+        public void RegisterQueryHandler(string header, EventHandler<QueryEventArgs> handler)
         {
-            if (QueryHandlers.ContainsKey(header)) { return false; }
-            else { QueryHandlers.Add(header, handler);return true; }
+            if (!QueryHandlers.ContainsKey(header))
+            {
+                QueryHandlers.Add(header, handler);
+            }
         }
         /// <summary>
-        /// Unregister the associated handler
+        /// Unregister the associated handlers
         /// </summary>
         /// <param name="header"></param>
         public void UnregisterQueryHandler(string header)
         {
             if (QueryHandlers.ContainsKey(header)) { QueryHandlers.Remove(header); }
         }
-        public void Send(IpcMessage message)
+
+        /// <summary>
+        /// Send a message to specified client(non-blocking).
+        /// </summary>
+        /// <param name="message"></param>
+        /// <param name="recepient"></param>
+        /// <param name="deliveryMethod"></param>
+        public void Send(IpcMessage message,Client recepient, NetDeliveryMethod deliveryMethod=NetDeliveryMethod.Unknown)
         {
-
-
-            if (String.IsNullOrEmpty(message.SenderAlias)) { message.SenderAlias = Alias; }
-            _server.Send(message.Recipient.ToString(), Encoding.UTF8.GetBytes(message.Raw));
-
-
-
+            if(deliveryMethod== NetDeliveryMethod.Unknown) { deliveryMethod=DefaultDeliveryMethod; }
+            var msg = _server.CreateMessage();
+            msg.Data=message.Serialize();
+            _server.SendMessage(msg, recepient.Connection, deliveryMethod,(int)message.MessageType);
         }
 
+        /// <summary>
+        /// Query a message and get response from client(blocking).
+        /// </summary>
+        /// <param name="message">The message to send</param>
+        /// <param name="target">The client to get response from</param>
+        /// <param name="timeout">Timeout in milliseconds</param>
+        /// <param name="deliveryMethod"></param>
+        /// <returns>The response from the client if received in specified time window; otherwise, null.</returns>
+        public IpcMessage Query(IpcMessage message, Client target,int timeout, NetDeliveryMethod deliveryMethod = NetDeliveryMethod.Unknown)
+        {
+            message.MessageType = MessageType.Query;
+            InProgreeQueries.Add(message.QueryID = GetQueryID());
+            IpcMessage Reply = null;
+            AutoResetEvent Replied = new AutoResetEvent(false);
+            var handler = new EventHandler<ReplyReceivedEventArgs>((s, args) =>
+            {
+                IpcMessage reply = args.Message;
+
+                // check query id
+                if (args.SenderEndPoint==target.EndPoint && reply.QueryID == message.QueryID)
+                {
+                    Reply = reply;
+                    Replied.Set();
+                }
+            });
+            OnReplyReceived += handler;
+            Send(message, target, deliveryMethod);
+            Replied.WaitOne(timeout);
+            OnReplyReceived -= handler;
+            InProgreeQueries.Remove(message.QueryID);
+            return Reply;
+        }
+        private int GetQueryID()
+        {
+            int ID = 0;
+            while ((ID==0)
+                || InProgreeQueries.Contains(ID))
+            {
+                byte[] rngBytes = new byte[4];
+
+                RandomNumberGenerator.Create().GetBytes(rngBytes);
+
+                // Convert the bytes into an integer
+                ID = BitConverter.ToInt32(rngBytes, 0);
+            }
+            return ID;
+        }
         private static string GetRandomString(int length)
         {
             var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";

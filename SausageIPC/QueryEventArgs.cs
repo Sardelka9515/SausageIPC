@@ -13,7 +13,11 @@ namespace SausageIPC
         public QueryEventArgs(IpcMessage qmsg)
         {
             Query = qmsg;
-            Reply=new IpcMessage(MessageType.Reply,ReplyStatus.Unhandled,Query.QueryID,Query.Sender);
+            Reply=new IpcMessage()
+            {
+                ReplyStatus=ReplyStatus.Unhandled,
+                MessageType=MessageType.Reply,
+            };
 
         }
         public IpcMessage Query;

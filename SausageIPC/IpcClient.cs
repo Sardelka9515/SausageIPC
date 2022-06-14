@@ -174,11 +174,11 @@ namespace SausageIPC
         {
             if (QueryHandlers.ContainsKey(header)) { QueryHandlers.Remove(header); }
         }
-        public List<IpcClientInfo> GetClients()
+        public List<Client> GetClients()
         {
             IpcMessage msg = Query(new IpcMessage(header:"!If.GetClients"));
             List<KeyValuePair<string, string>> clients = Helper.RemoveMd(msg.Parameters.Variables.ToList());
-            List<IpcClientInfo> Clients= new List<IpcClientInfo>();
+            List<Client> Clients= new List<Client>();
             foreach (KeyValuePair<string,string> pair in clients)
             {
                 try
