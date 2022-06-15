@@ -20,19 +20,20 @@ try
     var msg = new IpcMessage();
     msg.MetaData.Add("Header", "Hello");
     msg.MetaData.Add("Peep", "Poop");
-    msg.MetaData.Add("Boom", "Poop");
-    msg.MetaData.Add("Blah", "Poop");
+    msg.MetaData.Add("Boom", "Bang");
+    msg.MetaData.Add("Blah", "Bruh");
     msg.Data=new byte[10] { 1,2,3,4,5,6,7,8,9,10};
     client.Send(msg);
     var w = new System.Diagnostics.Stopwatch();
-    while (Console.ReadLine()!="exit")
+    do
     {
         w.Restart();
         var result = client.Query(msg);
         long ticks = w.ElapsedTicks;
-        long ms=w.ElapsedMilliseconds;
+        long ms = w.ElapsedMilliseconds;
         Console.WriteLine($"QueryResult[{ticks}/{ms}]:\n"+result.Dump());
-    }
+        Console.WriteLine("Press any key to send a query again, type exit to leave.");
+    } while (Console.ReadLine()!="exit");
     client.Disconnect("Bye");
 }
 catch(Exception ex)

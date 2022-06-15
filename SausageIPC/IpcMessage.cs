@@ -57,16 +57,16 @@ namespace SausageIPC
                 data.AddString(kv.Value);
             }
             data.AddRange(Data);
-            Console.WriteLine($"serialized:{data.Count}");
+            // Console.WriteLine($"serialized:{data.Count}");
             msg.Write(data.Count);
             msg.Write(data.ToArray());
         }
         internal void Deserialize(NetIncomingMessage msg)
         {
             if (msg.LengthBytes==0) {IsValid=false; return; }
-            Console.WriteLine($"Deserializing message:{msg.LengthBytes}");
-            int size;
-            Console.WriteLine($"packet size:{size=msg.ReadInt32()}");
+            // Console.WriteLine($"Deserializing message:{msg.LengthBytes}");
+            int size = msg.ReadInt32();
+            // Console.WriteLine($"packet size:{size}");
             var reader=new BitReader(msg.ReadBytes(size));
             
             if((MessageType = (MessageType)msg.SequenceChannel) == MessageType.Reply)
