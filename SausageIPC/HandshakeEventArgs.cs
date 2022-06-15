@@ -27,7 +27,7 @@ namespace SausageIPC
             ApproveResponse=response;
             Cancel=false;
         }
-        internal IpcMessage ApproveResponse { get; set; }
+        internal IpcMessage ApproveResponse { get; set; }=new IpcMessage();
         internal string DenyReason { get; set; }
         internal bool Cancel { get; set; } = false;
     }

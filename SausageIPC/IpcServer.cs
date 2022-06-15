@@ -16,12 +16,13 @@ namespace SausageIPC
         public IPEndPoint EndPoint;
         private NetServer _server;
         public string Alias;
-        public NetDeliveryMethod DefaultDeliveryMethod = NetDeliveryMethod.Unreliable;
+        public NetDeliveryMethod DefaultDeliveryMethod = NetDeliveryMethod.ReliableOrdered;
         public event EventHandler<MessageReceivedEventArgs> OnMessageReceived;
         public event EventHandler<HandshakeEventArgs> OnHandshake;
         public event EventHandler<Client> OnClientConnected;
         public event EventHandler<Client> OnClientDisonnected;
         public event EventHandler<QueryEventArgs> OnQuerying;
+        
         private Thread NetworkThread;
         private event EventHandler<ReplyReceivedEventArgs> OnReplyReceived;
         private HashSet<int> InProgreeQueries=new HashSet<int>();
@@ -29,7 +30,7 @@ namespace SausageIPC
         public Dictionary<IPEndPoint,Client> Clients=new Dictionary<IPEndPoint,Client>();
 
         private bool Stopping = false;
-
+        private Logger logger;
         #region Constructors
         /// <summary>
         /// Start an IPC server.
@@ -37,20 +38,19 @@ namespace SausageIPC
         /// <param name="_endPoint">IPEndPoint to listen for connections</param>
         /// <param name="Alias"></param>
         /// <param name="UseAlternatePort">Increase port number and retry if the server failed to start.</param>
-        public IpcServer(IPEndPoint _endPoint,string alias=null,bool UseAlternatePort=false)
+        public IpcServer(IPEndPoint _endPoint,string alias=null,Logger _logger=null,bool UseAlternatePort=false)
         {
-            
+            logger= _logger;
         retry:
             try
             {
 
                 EndPoint = _endPoint;
-                IpcDebug.Write("Staring IPC server at "+EndPoint.ToString(),"StartIPC",LogType.Info);
+                logger?.Info("Staring IPC server at "+EndPoint.ToString());
 
                 var config = new NetPeerConfiguration("SausageIPC")
                 {
                     AutoFlushSendQueue = true,
-                    LocalAddress =EndPoint.Address,
                     Port=EndPoint.Port,
                 };
                 config.EnableMessageType(NetIncomingMessageType.ConnectionApproval);
@@ -61,7 +61,7 @@ namespace SausageIPC
                 {
                     while (!Stopping)
                     {
-                        Process(_server.WaitMessage(20));
+                        Process(_server.WaitMessage(200));
                     }
                 });
                 NetworkThread.Start();
@@ -71,7 +71,7 @@ namespace SausageIPC
             }
             catch (Exception ex)
             {
-                IpcDebug.Write(ex, "StartIPC", LogType.Warning);
+                logger.Error(ex);
                 
 
                 if (UseAlternatePort) { EndPoint.Port++; goto retry; }
@@ -82,10 +82,12 @@ namespace SausageIPC
         private void Process(NetIncomingMessage msg)
         {
             if(msg == null) { return; }
+            // logger?.Info($"message received:{msg.MessageType},{msg.SequenceChannel}");
             switch (msg.MessageType)
             {
                 case NetIncomingMessageType.ConnectionApproval:
                     {
+                        // logger?.Info(msg.SenderEndPoint.ToString()+" is attempting to connect.");
                         var message = new IpcMessage(msg);
                         var args = new HandshakeEventArgs()
                         {
@@ -99,16 +101,9 @@ namespace SausageIPC
                         }
                         else
                         {
-                            if (args.ApproveResponse==null)
-                            {
-                                msg.SenderConnection.Approve();
-                            }
-                            else
-                            {
-                                var response = _server.CreateMessage();
-                                response.Data = args.ApproveResponse.Serialize();
-                                msg.SenderConnection.Approve(response);
-                            }
+                            var response = _server.CreateMessage();
+                            args.ApproveResponse.Serialize(response);
+                            msg.SenderConnection.Approve(response);
                             Clients.Add(msg.SenderEndPoint, new Client()
                             {
                                 Alias=args.Alias,
@@ -134,12 +129,13 @@ namespace SausageIPC
                 case NetIncomingMessageType.StatusChanged:
                     {
                         NetConnectionStatus status = (NetConnectionStatus)msg.ReadByte();
-
+                        // logger?.Trace($"Status changed:{status}");
                         if (status == NetConnectionStatus.Disconnected)
                         {
                             Client c;
                             if (Clients.TryGetValue(msg.SenderEndPoint,out c))
                             {
+                                logger?.Debug($"{msg.SenderEndPoint} disconnected");
                                 OnClientDisonnected?.Invoke(this, c);
                                 Clients.Remove(msg.SenderEndPoint);
                             }
@@ -149,6 +145,7 @@ namespace SausageIPC
                             Client c;
                             if(Clients.TryGetValue(msg.SenderEndPoint,out c))
                             {
+                                logger?.Debug($"{msg.SenderEndPoint} [{c.Alias}] connected");
                                 OnClientConnected?.Invoke(this,c);
                             }
                             else
@@ -182,7 +179,7 @@ namespace SausageIPC
                                 {
                                     var args = new QueryEventArgs(message);
                                     OnQuerying?.Invoke(this, args);
-
+                                    args.ReplyMessage.MessageType=MessageType.Reply;
                                     Send(args.ReplyMessage, sender);
                                     break;
                                 }
@@ -198,6 +195,11 @@ namespace SausageIPC
                         }
                         break;
                     }
+                case NetIncomingMessageType.DebugMessage:
+                    {
+                        logger?.Debug(msg.ReadString());
+                        break;
+                    }
             }
         }
         public void Stop(string byeMessage)
@@ -207,7 +209,7 @@ namespace SausageIPC
             NetworkThread.Join();
         }
 
-        public IpcServer(string ipport, string alias = null, bool UseAlternatePort = false) : this(Helper.StringToEP(ipport),alias , UseAlternatePort) { }
+        public IpcServer(string ipport, string alias = null,Logger _logger=null, bool UseAlternatePort = false) : this(Helper.StringToEP(ipport),alias , _logger,UseAlternatePort) { }
         #endregion
 
         public IPEndPoint GetClientByAlias(string alias)
@@ -230,7 +232,7 @@ namespace SausageIPC
         {
             if(deliveryMethod== NetDeliveryMethod.Unknown) { deliveryMethod=DefaultDeliveryMethod; }
             var msg = _server.CreateMessage();
-            msg.Data=message.Serialize();
+            message.Serialize(msg);
             _server.SendMessage(msg, recepient.Connection, deliveryMethod,(int)message.MessageType);
         }
 

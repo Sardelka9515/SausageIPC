@@ -28,7 +28,7 @@ namespace SausageIPC
         public IpcMessage() { }
         internal ReplyStatus ReplyStatus { get; set; } = ReplyStatus.Unused;
         internal bool IsValid { get; set; } = true;
-        public byte[] Data { get; set; }
+        public byte[] Data { get; set; }=new byte[0];
         internal IpcMessage(NetIncomingMessage msg)
         {
             Deserialize(msg);
@@ -36,7 +36,7 @@ namespace SausageIPC
         internal MessageType MessageType { get; set; } = MessageType.Message;
         internal int QueryID { get; set; }
         public Dictionary<string, string> MetaData { get; set; } = new Dictionary<string, string>();
-        internal byte[] Serialize()
+        internal void Serialize(NetOutgoingMessage msg)
         {
             List<byte> data = new List<byte>();
             switch (MessageType)
@@ -57,12 +57,17 @@ namespace SausageIPC
                 data.AddString(kv.Value);
             }
             data.AddRange(Data);
-            return data.ToArray();
+            Console.WriteLine($"serialized:{data.Count}");
+            msg.Write(data.Count);
+            msg.Write(data.ToArray());
         }
         internal void Deserialize(NetIncomingMessage msg)
         {
-            if (msg.Data.Length==0) {IsValid=false; return; }
-            var reader=new BitReader(msg.Data);
+            if (msg.LengthBytes==0) {IsValid=false; return; }
+            Console.WriteLine($"Deserializing message:{msg.LengthBytes}");
+            int size;
+            Console.WriteLine($"packet size:{size=msg.ReadInt32()}");
+            var reader=new BitReader(msg.ReadBytes(size));
             
             if((MessageType = (MessageType)msg.SequenceChannel) == MessageType.Reply)
             {
@@ -78,7 +83,31 @@ namespace SausageIPC
             {
                 MetaData.Add(reader.ReadString(),reader.ReadString());
             }
-            Data = msg.Data.Skip(reader.CurrentIndex).ToArray();
+            Data = reader.ReadByteArray(size-reader.CurrentIndex);
+        }
+        /// <summary>
+        /// Dump entire message to a human-readable format, used for debugging.
+        /// </summary>
+        /// <returns></returns>
+        public string Dump()
+        {
+            var s = $"[Type]\n{MessageType}\n";
+            if(MessageType == MessageType.Query)
+            {
+                s+=$"[QueryID]\n{QueryID}\n";
+            }
+            else if(MessageType == MessageType.Reply)
+            {
+                s+=$"[ReplyStatus]\n{ReplyStatus}\n";
+            }
+            s+="[MetaData]\n";
+            foreach(var kv in MetaData)
+            {
+                s+=$"{kv.Key}={kv.Value}\n";
+            }
+            s+="[Data]\n{";
+            s+=string.Join(",", Data)+"}\n";
+            return s;
         }
     }
 }

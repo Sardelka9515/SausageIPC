@@ -3,7 +3,9 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.2.32526.322
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SausageIPC", "SausageIPC\SausageIPC.csproj", "{FDA7FFE0-502E-4E6C-9F13-32FA08D7C0F5}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "SausageIPC", "SausageIPC\SausageIPC.csproj", "{FDA7FFE0-502E-4E6C-9F13-32FA08D7C0F5}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SausageIPC.Samples", "SausageIPC.Samples\SausageIPC.Samples.csproj", "{4021DDFE-13BB-4440-9EB6-E6EEEE91020D}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -15,6 +17,10 @@ Global
 		{FDA7FFE0-502E-4E6C-9F13-32FA08D7C0F5}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{FDA7FFE0-502E-4E6C-9F13-32FA08D7C0F5}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{FDA7FFE0-502E-4E6C-9F13-32FA08D7C0F5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4021DDFE-13BB-4440-9EB6-E6EEEE91020D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4021DDFE-13BB-4440-9EB6-E6EEEE91020D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4021DDFE-13BB-4440-9EB6-E6EEEE91020D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4021DDFE-13BB-4440-9EB6-E6EEEE91020D}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

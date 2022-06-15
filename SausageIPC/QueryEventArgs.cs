@@ -16,6 +16,7 @@ namespace SausageIPC
             {
                 ReplyStatus=ReplyStatus.Unhandled,
                 MessageType=MessageType.Reply,
+                QueryID=Query.QueryID
             };
         }
         public void Reply(IpcMessage msg,ReplyStatus statusCode=ReplyStatus.Sucess)
